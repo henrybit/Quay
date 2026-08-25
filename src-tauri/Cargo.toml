@@ -1,0 +1,29 @@
+[package]
+name = "mq-gui"
+version = "0.1.0"
+description = "Desktop viewer for RabbitMQ, Kafka and RocketMQ"
+authors = ["mq-gui"]
+edition = "2021"
+rust-version = "1.77.2"
+
+[lib]
+name = "mq_gui_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2.6.3", features = [] }
+
+[dependencies]
+serde_json = "1.0"
+serde = { version = "1.0", features = ["derive"] }
+log = "0.4"
+tauri = { version = "2.11.3", features = [] }
+tauri-plugin-log = "2"
+tokio = { version = "1", features = ["net", "io-util", "time", "macros", "sync"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+uuid = { version = "1", features = ["v4"] }
+chrono = { version = "0.4", features = ["serde"] }
+thiserror = "2"
+urlencoding = "2"
+bytes = "1"
+rskafka = { version = "0.6", default-features = false, features = ["compression-gzip"] }
