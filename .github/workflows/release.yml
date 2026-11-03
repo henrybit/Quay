@@ -1,116 +1,97 @@
-# Build & publish Quay for Windows / macOS / Linux when a version tag is pushed.
+# Build & publish Quay for Windows / macOS / Linux.
+# macOS signing follows the same pattern as db-gui (HiDataLinker):
+#   pass APPLE_* secrets straight to tauri-action — do not pre-import PKCS12.
 #
 # Trigger:
 #   git tag v0.1.0 && git push origin v0.1.0
 #
-# Required GitHub repository secrets (Settings → Secrets and variables → Actions):
-#
-#   macOS code signing + notarization
-#   ---------------------------------
+# Required secrets (same names as db-gui — copy from that repo if builds already succeed there):
 #   APPLE_CERTIFICATE            Single-line base64 of Developer ID Application .p12
-#                                (export the private KEY under the cert in Keychain Access)
-#                                  openssl base64 -A -in cert.p12 -out cert-base64.txt
-#                                  # or: base64 -i cert.p12 | pbcopy
-#   APPLE_CERTIFICATE_PASSWORD   Exact password set when exporting the .p12 (no quotes/spaces)
+#                                openssl base64 -A -in cert.p12 | pbcopy
+#   APPLE_CERTIFICATE_PASSWORD   Password used when exporting the .p12
 #   APPLE_ID                     Apple ID email
 #   APPLE_PASSWORD               App-specific password
-#                                (appleid.apple.com → Sign-In and Security → App-Specific Passwords)
-#   APPLE_TEAM_ID                Team ID from developer.apple.com/account → Membership
+#   APPLE_TEAM_ID                Team ID from developer.apple.com/account
 #
-#   Optional:
-#   APPLE_SIGNING_IDENTITY       Explicit codesign identity; inferred from certificate if omitted
-#
-#   Alternative notarization via App Store Connect API (instead of APPLE_ID/PASSWORD):
-#   APPLE_API_ISSUER             Issuer ID
-#   APPLE_API_KEY                Key ID
-#   APPLE_API_KEY_CONTENT        Full contents of AuthKey_<KEYID>.p8
-#
-#   If you see "MAC verification failed during PKCS12 import (wrong password?)":
-#   1. Re-export .p12 from Keychain → My Certificates → expand cert → Export the KEY
-#   2. Locally verify: openssl pkcs12 -info -in cert.p12 -passin pass:'YOUR_PASSWORD' -noout
-#   3. openssl base64 -A -in cert.p12 | pbcopy  → update APPLE_CERTIFICATE (one line)
-#   4. APPLE_CERTIFICATE_PASSWORD = .p12 export password only (not Apple ID / keychain password)
-#   Workflow falls back to ad-hoc signing when import fails so the Release still publishes.
-#
-# Also ensure: Settings → Actions → General → Workflow permissions → Read and write.
+# Also: Settings → Actions → General → Workflow permissions → Read and write.
 
 name: Release
 
 on:
   push:
     tags:
-      - 'v*'
+      - 'v*.*.*'
   workflow_dispatch:
     inputs:
-      tag:
-        description: 'Existing tag to build (e.g. v0.1.0). Leave empty to use package version.'
-        required: false
-        type: string
+      platform:
+        description: 要打包的平台
+        type: choice
+        options:
+          - all
+          - linux
+          - macos
+          - windows
+        default: all
 
 permissions:
   contents: write
 
 concurrency:
   group: release-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 jobs:
+  select:
+    runs-on: ubuntu-latest
+    outputs:
+      include: ${{ steps.set.outputs.include }}
+    steps:
+      - id: set
+        env:
+          PLATFORM: ${{ github.event_name == 'workflow_dispatch' && inputs.platform || 'all' }}
+        run: |
+          set -eu
+          case "$PLATFORM" in
+            linux)
+              include='[{"platform":"ubuntu-22.04","rust_targets":"","args":"--bundles deb,appimage"}]'
+              ;;
+            macos)
+              include='[{"platform":"macos-latest","rust_targets":"aarch64-apple-darwin","args":"--target aarch64-apple-darwin --bundles dmg"},{"platform":"macos-latest","rust_targets":"x86_64-apple-darwin","args":"--target x86_64-apple-darwin --bundles dmg"}]'
+              ;;
+            windows)
+              include='[{"platform":"windows-latest","rust_targets":"","args":"--bundles nsis,msi"}]'
+              ;;
+            *)
+              include='[{"platform":"macos-latest","rust_targets":"aarch64-apple-darwin","args":"--target aarch64-apple-darwin --bundles dmg"},{"platform":"macos-latest","rust_targets":"x86_64-apple-darwin","args":"--target x86_64-apple-darwin --bundles dmg"},{"platform":"windows-latest","rust_targets":"","args":"--bundles nsis,msi"},{"platform":"ubuntu-22.04","rust_targets":"","args":"--bundles deb,appimage"}]'
+              ;;
+          esac
+          echo "include=$include" >> "$GITHUB_OUTPUT"
+
   publish:
+    needs: select
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - platform: macos-latest
-            args: --target aarch64-apple-darwin
-            rust_targets: aarch64-apple-darwin
-          - platform: macos-latest
-            args: --target x86_64-apple-darwin
-            rust_targets: x86_64-apple-darwin
-          - platform: ubuntu-22.04
-            args: ''
-            rust_targets: ''
-          - platform: windows-latest
-            args: ''
-            rust_targets: ''
-
+        include: ${{ fromJson(needs.select.outputs.include) }}
     runs-on: ${{ matrix.platform }}
+    timeout-minutes: 90
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Resolve release tag
-        id: meta
+      - name: Sync version from git tag
+        if: startsWith(github.ref, 'refs/tags/v')
         shell: bash
         run: |
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ -n "${{ inputs.tag }}" ]; then
-            TAG="${{ inputs.tag }}"
-          elif [[ "${{ github.ref }}" == refs/tags/* ]]; then
-            TAG="${GITHUB_REF_NAME}"
-          else
-            TAG="v$(python3 -c "import json; print(json.load(open('src-tauri/tauri.conf.json'))['version'])")"
-          fi
-          VERSION="${TAG#v}"
-          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
-          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
-          echo "Resolved tag=${TAG} version=${VERSION}"
-
-      - name: Sync version from tag
-        if: github.event_name == 'push' || inputs.tag != ''
-        shell: bash
-        env:
-          VERSION: ${{ steps.meta.outputs.version }}
-        run: |
+          export VERSION="${GITHUB_REF_NAME#v}"
           python3 <<'PY'
           import json, os, pathlib, re
-
           version = os.environ["VERSION"]
           for path in ("package.json", "src-tauri/tauri.conf.json"):
               p = pathlib.Path(path)
               data = json.loads(p.read_text())
               data["version"] = version
               p.write_text(json.dumps(data, indent=2) + "\n")
-
           cargo = pathlib.Path("src-tauri/Cargo.toml")
           text = cargo.read_text()
           text, n = re.subn(r'(?m)^version = ".*"', f'version = "{version}"', text, count=1)
@@ -120,188 +101,129 @@ jobs:
           print(f"Synced project version to {version}")
           PY
 
-      - name: Install Linux dependencies
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.rust_targets }}
+
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: './src-tauri -> target'
+
+      - name: Install Linux system dependencies
         if: matrix.platform == 'ubuntu-22.04'
         run: |
           sudo apt-get update
           sudo apt-get install -y \
             libwebkit2gtk-4.1-dev \
-            libappindicator3-dev \
+            libssl-dev \
+            libayatana-appindicator3-dev \
             librsvg2-dev \
             patchelf \
-            xdg-utils
-
-      - name: Setup pnpm
-        uses: pnpm/action-setup@v4
-        with:
-          version: 10
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: 24
-          cache: pnpm
-
-      - name: Install Rust stable
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: ${{ matrix.rust_targets }}
-
-      - name: Rust cache
-        uses: swatinem/rust-cache@v2
-        with:
-          workspaces: './src-tauri -> target'
+            pkg-config
 
       - name: Install frontend dependencies
         run: pnpm install --frozen-lockfile
 
-      - name: Prepare Apple signing (macOS)
-        id: apple_sign
-        if: runner.os == 'macOS'
-        shell: bash
+      # Same as db-gui: only verify secrets exist; let tauri-action import the PKCS12.
+      - name: Check Apple signing secrets
+        if: matrix.platform == 'macos-latest'
         env:
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
-          KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD || 'quay-ci-keychain' }}
-          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
-          APPLE_API_KEY_CONTENT: ${{ secrets.APPLE_API_KEY_CONTENT }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         run: |
-          set -euo pipefail
-
-          use_adhoc() {
-            local reason="$1"
-            echo "::warning::$reason — falling back to ad-hoc signing (not notarized)."
-            echo "APPLE_SIGNING_IDENTITY=-" >> "$GITHUB_ENV"
-            # Explicitly clear so tauri-action never receives broken PKCS12 secrets
-            {
-              echo "APPLE_CERTIFICATE="
-              echo "APPLE_CERTIFICATE_PASSWORD="
-            } >> "$GITHUB_ENV"
-            echo "mode=adhoc" >> "$GITHUB_OUTPUT"
-          }
-
-          # Optional App Store Connect API key for notarization
-          if [ -n "${APPLE_API_KEY_CONTENT:-}" ] && [ -n "${APPLE_API_KEY:-}" ]; then
-            mkdir -p "${RUNNER_TEMP}/private_keys"
-            KEY_PATH="${RUNNER_TEMP}/private_keys/AuthKey_${APPLE_API_KEY}.p8"
-            printf '%s' "$APPLE_API_KEY_CONTENT" > "$KEY_PATH"
-            echo "APPLE_API_KEY_PATH=${KEY_PATH}" >> "$GITHUB_ENV"
-            echo "API_PRIVATE_KEYS_DIR=${RUNNER_TEMP}/private_keys" >> "$GITHUB_ENV"
-          else
-            echo "APPLE_API_KEY_CONTENT not set; notarization will use Apple ID secrets if present."
-          fi
-
-          CERT="$(printf '%s' "${APPLE_CERTIFICATE:-}" | tr -d '\n\r[:space:]')"
-          PASS="$(printf '%s' "${APPLE_CERTIFICATE_PASSWORD:-}" | tr -d '\r')"
-          PASS="$(printf '%s' "$PASS" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
-
-          if [ -z "$CERT" ]; then
-            use_adhoc "APPLE_CERTIFICATE not set"
-            exit 0
-          fi
-
-          if [ -z "$PASS" ]; then
-            use_adhoc "APPLE_CERTIFICATE_PASSWORD is empty"
-            exit 0
-          fi
-
-          CERT_PATH="${RUNNER_TEMP}/quay-signing.p12"
-          MODERN_PATH="${RUNNER_TEMP}/quay-signing-modern.p12"
-          PEM_PATH="${RUNNER_TEMP}/quay-signing.pem"
-          printf '%s' "$CERT" | base64 --decode > "$CERT_PATH"
-          FILE_SIZE="$(wc -c < "$CERT_PATH" | tr -d ' ')"
-          if [ "$FILE_SIZE" -lt 100 ]; then
-            use_adhoc "Decoded APPLE_CERTIFICATE is only ${FILE_SIZE} bytes (invalid base64)"
-            exit 0
-          fi
-
-          # Prefer a PKCS12 that Apple security accepts: decrypt then re-export.
-          EXTRACTED=0
-          for ARGS in "" "-legacy"; do
-            # shellcheck disable=SC2086
-            if openssl pkcs12 -in "$CERT_PATH" -passin "pass:${PASS}" -nodes -out "$PEM_PATH" $ARGS \
-              2>"${RUNNER_TEMP}/pkcs12.err"; then
-              EXTRACTED=1
-              break
+          missing=0
+          for name in APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD APPLE_ID APPLE_PASSWORD APPLE_TEAM_ID; do
+            if [ -z "${!name}" ]; then
+              echo "Missing GitHub secret: $name"
+              missing=1
             fi
           done
+          exit "$missing"
 
-          if [ "$EXTRACTED" -ne 1 ]; then
-            echo "OpenSSL could not decrypt PKCS12:"
-            cat "${RUNNER_TEMP}/pkcs12.err" || true
-            use_adhoc "APPLE_CERTIFICATE_PASSWORD does not match APPLE_CERTIFICATE (or cert is corrupt)"
-            exit 0
-          fi
-
-          openssl pkcs12 -export -in "$PEM_PATH" -out "$MODERN_PATH" -passout "pass:${PASS}" \
-            2>"${RUNNER_TEMP}/pkcs12-export.err" || {
-            cat "${RUNNER_TEMP}/pkcs12-export.err" || true
-            use_adhoc "Failed to re-export PKCS12 for Apple security"
-            exit 0
-          }
-
-          KEYCHAIN_PATH="${RUNNER_TEMP}/quay.build.keychain-db"
-          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
-          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
-          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
-          security list-keychains -d user -s "$KEYCHAIN_PATH" $(security list-keychains -d user | sed s/\"//g)
-
-          if ! security import "$MODERN_PATH" -P "$PASS" -A -t cert -f pkcs12 \
-            -k "$KEYCHAIN_PATH" >/dev/null 2>"${RUNNER_TEMP}/security-import.err"; then
-            echo "security import failed:"
-            cat "${RUNNER_TEMP}/security-import.err" || true
-            use_adhoc "security import rejected PKCS12 (wrong password or unsupported cert)"
-            exit 0
-          fi
-
-          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
-          security find-identity -v -p codesigning "$KEYCHAIN_PATH"
-
-          IDENTITY="$(security find-identity -v -p codesigning "$KEYCHAIN_PATH" | awk -F'"' '/Developer ID Application|Apple Distribution|Apple Development/{print $2; exit}')"
-          if [ -z "$IDENTITY" ]; then
-            use_adhoc "No usable codesigning identity found after import"
-            exit 0
-          fi
-
-          # Import into keychain ourselves; do NOT pass APPLE_CERTIFICATE to Tauri
-          # (avoids a second security import that fails with MAC verification).
-          {
-            echo "APPLE_SIGNING_IDENTITY<<ID_EOF"
-            echo "$IDENTITY"
-            echo "ID_EOF"
-            echo "APPLE_CERTIFICATE="
-            echo "APPLE_CERTIFICATE_PASSWORD="
-          } >> "$GITHUB_ENV"
-          echo "mode=signed" >> "$GITHUB_OUTPUT"
-          echo "Imported signing identity: $IDENTITY"
-
-      - name: Build and upload release assets
-        uses: tauri-apps/tauri-action@v1
+      - uses: tauri-apps/tauri-action@v1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # Never pass raw PKCS12 secrets into tauri-action on macOS.
-          # Prepare step imports into keychain (signed) or clears them (adhoc).
-          APPLE_CERTIFICATE: ${{ env.APPLE_CERTIFICATE }}
-          APPLE_CERTIFICATE_PASSWORD: ${{ env.APPLE_CERTIFICATE_PASSWORD }}
-          APPLE_SIGNING_IDENTITY: ${{ env.APPLE_SIGNING_IDENTITY }}
-          # Notarization only when Developer ID import succeeded
-          APPLE_ID: ${{ steps.apple_sign.outputs.mode == 'signed' && secrets.APPLE_ID || '' }}
-          APPLE_PASSWORD: ${{ steps.apple_sign.outputs.mode == 'signed' && secrets.APPLE_PASSWORD || '' }}
-          APPLE_TEAM_ID: ${{ steps.apple_sign.outputs.mode == 'signed' && secrets.APPLE_TEAM_ID || '' }}
-          APPLE_API_KEY: ${{ steps.apple_sign.outputs.mode == 'signed' && secrets.APPLE_API_KEY || '' }}
-          APPLE_API_ISSUER: ${{ steps.apple_sign.outputs.mode == 'signed' && secrets.APPLE_API_ISSUER || '' }}
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         with:
-          tagName: ${{ steps.meta.outputs.tag }}
-          releaseName: Quay ${{ steps.meta.outputs.tag }}
+          tagName: v__VERSION__
+          releaseName: Quay v__VERSION__
           releaseBody: |
-            ## Quay ${{ steps.meta.outputs.tag }}
-
-            Download the installer for your platform from the assets below.
-
-            - **macOS Apple Silicon** — `.dmg` (`aarch64-apple-darwin`)
-            - **macOS Intel** — `.dmg` (`x86_64-apple-darwin`)
-            - **Windows** — `.msi` / NSIS `.exe`
-            - **Linux** — `.AppImage` / `.deb`
+            安装包正在上传。全部平台完成后会补上下载地址。
           releaseDraft: false
-          prerelease: ${{ contains(steps.meta.outputs.tag, '-') }}
+          prerelease: false
+          uploadUpdaterJson: false
           args: ${{ matrix.args }}
+
+  notes:
+    needs: publish
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Write release notes with download links
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -eu
+          version=$(node -p "require('./package.json').version")
+          # Prefer the pushed tag when present
+          if [[ "${GITHUB_REF:-}" == refs/tags/v* ]]; then
+            tag="${GITHUB_REF_NAME}"
+            version="${tag#v}"
+          else
+            tag="v${version}"
+          fi
+          notes=$(mktemp)
+
+          {
+            echo "# Quay ${version}"
+            echo
+            echo "桌面端消息中间件查看工具（RabbitMQ / Kafka / RocketMQ）。"
+            echo
+            echo "## 下载"
+            echo
+            names=$(gh release view "$tag" --repo "$REPO" --json assets --jq '.assets[].name' || true)
+            if [ -z "$names" ]; then
+              echo "安装包尚未上传成功，请查看 Actions 日志。"
+            else
+              echo "$names" | while IFS= read -r name; do
+                url="https://github.com/${REPO}/releases/download/${tag}/${name}"
+                label="$name"
+                case "$name" in
+                  *aarch64*.dmg) label="macOS Apple Silicon（.dmg）" ;;
+                  *x64*.dmg|*x86_64*.dmg) label="macOS Intel（.dmg）" ;;
+                  *.dmg) label="macOS（.dmg）" ;;
+                  *.msi) label="Windows（.msi）" ;;
+                  *.exe) label="Windows（.exe）" ;;
+                  *.deb) label="Linux（.deb）" ;;
+                  *.AppImage) label="Linux（.AppImage）" ;;
+                esac
+                echo "- [${label}](${url})"
+              done
+            fi
+            echo
+            echo "macOS 安装包使用 Developer ID 签名并公证。Windows 若被 SmartScreen 拦截，选择仍要运行。"
+          } > "$notes"
+
+          gh release edit "$tag" --repo "$REPO" --title "Quay v${version}" --notes-file "$notes"
+          echo "Updated https://github.com/${REPO}/releases/tag/${tag}"
