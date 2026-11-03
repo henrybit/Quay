@@ -1,4 +1,4 @@
-# MQ GUI
+# Quay
 
 桌面端消息查看工具，覆盖 **RabbitMQ / Kafka / RocketMQ**。界面用 SvelteKit，桌面壳用 Tauri 2，连接配置保存在本机。
 
@@ -9,6 +9,8 @@
 - **RabbitMQ**：Management API 总览、队列 Ready/Unacked、交换机类型、绑定、Peek 消息、发布
 - **Kafka**：Broker/Topic、分区 Earliest/Latest、消费组与 Lag、按 offset 浏览、生产消息
 - **RocketMQ**：NameServer 集群、Topic 路由/DLQ/Retry 分类、消费进度、按 MessageKey 查询、发送
+
+更完整的产品说明见 [PRODUCT.md](./PRODUCT.md)，使用步骤见 [USER_GUIDE.md](./USER_GUIDE.md)。
 
 ## 开发
 
@@ -39,4 +41,4 @@ pnpm desktop:build
 | Kafka | Bootstrap brokers | SASL PLAIN 可选 |
 | RocketMQ | NameServer | 走 Remoting 协议；ACL 字段可选 |
 
-连接 JSON 位于系统应用配置目录（macOS: `~/Library/Application Support/com.mqgui.app/connections.json`）。
+连接 JSON 位于系统应用配置目录（macOS: `~/Library/Application Support/com.quay.app/connections.json`）。

@@ -1,6 +1,6 @@
-# MQ GUI 使用说明书
+# Quay 使用说明书
 
-MQ GUI 是一款桌面端消息中间件管理工具，支持 **RabbitMQ**、**Kafka** 和 **RocketMQ** 三种主流消息队列。可视化浏览集群拓扑、查看队列状态、消费消息、发布测试消息。
+Quay 是一款桌面端消息中间件管理工具，支持 **RabbitMQ**、**Kafka** 和 **RocketMQ** 三种主流消息队列。可视化浏览集群拓扑、查看队列状态、消费消息、发布测试消息。
 
 ---
 
@@ -20,8 +20,7 @@ MQ GUI 是一款桌面端消息中间件管理工具，支持 **RabbitMQ**、**K
 
 ### 系统要求
 
-- **macOS**（当前版本主要支持）
-- Windows/Linux 通过 Tauri 跨平台构建后可通用
+- **macOS** / **Windows** / **Linux**（Tauri 跨平台构建）
 
 ### 安装方式
 
@@ -37,7 +36,7 @@ MQ GUI 是一款桌面端消息中间件管理工具，支持 **RabbitMQ**、**K
 
 ### 新建连接
 
-点击欢迎页中的「新建连接」按钮，或点击左侧栏顶部 `+` 图标，选择要连接的中间件类型（RabbitMQ / Kafka / RocketMQ），填写配置后保存。
+点击欢迎页中的「新建连接」按钮，或点击左侧栏顶部「新建」，选择要连接的中间件类型（RabbitMQ / Kafka / RocketMQ），填写配置后保存。
 
 ### 连接配置说明
 
@@ -49,13 +48,15 @@ MQ GUI 是一款桌面端消息中间件管理工具，支持 **RabbitMQ**、**K
 
 ### 编辑 / 删除连接
 
-在左侧栏右键或点击连接右侧的操作按钮，可对已保存的连接进行编辑或删除。
+在左侧栏点击连接右侧的操作按钮，可对已保存的连接进行编辑或删除。
 
 ### 连接配置文件
 
 所有连接配置保存在本地文件中：
 
-- **macOS**：`~/Library/Application Support/com.mqgui.app/connections.json`
+- **macOS**：`~/Library/Application Support/com.quay.app/connections.json`
+- **Windows**：`%APPDATA%\com.quay.app\connections.json`
+- **Linux**：`~/.config/com.quay.app/connections.json`
 
 ---
 
@@ -94,7 +95,7 @@ MQ GUI 是一款桌面端消息中间件管理工具，支持 **RabbitMQ**、**K
 
 ### 消费组 Lag
 
-Lag 表示消费端已消费到最新消息的差距，Lag 越大说明消费积压越严重。
+Lag 表示消费端相对最新消息的差距，Lag 越大说明消费积压越严重。
 
 ### 生产消息
 
@@ -130,7 +131,7 @@ Lag 表示消费端已消费到最新消息的差距，Lag 越大说明消费积
 连接信息以 JSON 格式存储在本机，不上传至任何服务器。配置文件路径：
 
 ```
-~/Library/Application Support/com.mqgui.app/connections.json
+~/Library/Application Support/com.quay.app/connections.json
 ```
 
 ### 敏感信息
@@ -154,8 +155,12 @@ A: 检查是否配置了正确的 Bootstrap Servers 地址，并确认 Kafka 监
 
 **Q: RocketMQ 消费进度显示为 0**
 
-A: 确认消费者组已启动并有实际消费行为。RocketMQ GUI 显示的是消费者提交的消费位点。
+A: 确认消费者组已启动并有实际消费行为。Quay 显示的是消费者提交的消费位点。
 
 **Q: 连接配置丢失怎么办**
 
-A: 配置文件位于 `~/Library/Application Support/com.mqgui.app/connections.json`，请勿手动删除或修改该文件，否则已保存的连接将丢失。
+A: 配置文件位于应用配置目录下的 `connections.json`（macOS 示例：`~/Library/Application Support/com.quay.app/connections.json`），请勿手动删除或错误修改该文件，否则已保存的连接将丢失。
+
+**Q: 从旧版 MQ GUI 升级后找不到连接？**
+
+A: 应用标识已改为 `com.quay.app`，配置目录随之变更。可将旧目录 `com.mqgui.app` 中的 `connections.json` 复制到新目录即可。

@@ -13,7 +13,7 @@
 </script>
 
 <svelte:head>
-	<title>MQ GUI</title>
+	<title>Quay</title>
 </svelte:head>
 
 <div class="app-shell">

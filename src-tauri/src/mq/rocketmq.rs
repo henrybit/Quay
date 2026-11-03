@@ -166,7 +166,7 @@ impl RocketClient {
             properties.push_str(&format!("TAGS\u{1}{tags}\u{2}"));
         }
         let ext = json!({
-            "producerGroup": "mq-gui-producer",
+            "producerGroup": "quay-producer",
             "topic": topic,
             "defaultTopic": "TBW102",
             "defaultTopicQueueNums": "4",

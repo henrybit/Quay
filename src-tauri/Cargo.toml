@@ -1,13 +1,13 @@
 [package]
-name = "mq-gui"
+name = "quay"
 version = "0.1.0"
 description = "Desktop viewer for RabbitMQ, Kafka and RocketMQ"
-authors = ["mq-gui"]
+authors = ["quay"]
 edition = "2021"
 rust-version = "1.77.2"
 
 [lib]
-name = "mq_gui_lib"
+name = "quay_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]

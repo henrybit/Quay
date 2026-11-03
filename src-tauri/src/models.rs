@@ -66,7 +66,7 @@ fn default_vhost() -> String {
 }
 
 fn default_client_id() -> String {
-    "mq-gui".into()
+    "quay".into()
 }
 
 impl ConnectionProfile {

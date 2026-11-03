@@ -1,8 +1,8 @@
 {
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
-  "productName": "MQ GUI",
+  "productName": "Quay",
   "version": "0.1.0",
-  "identifier": "com.mqgui.app",
+  "identifier": "com.quay.app",
   "build": {
     "frontendDist": "../build",
     "devUrl": "http://localhost:5173",
@@ -12,7 +12,7 @@
   "app": {
     "windows": [
       {
-        "title": "MQ GUI",
+        "title": "Quay",
         "width": 1440,
         "height": 900,
         "minWidth": 1100,

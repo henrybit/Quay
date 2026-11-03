@@ -46,7 +46,7 @@ export const BROKER_CATALOG: Record<BrokerKind, BrokerMeta> = {
 				multiline: true,
 				hint: '多个地址用逗号或换行分隔'
 			},
-			{ key: 'clientId', label: 'Client ID', placeholder: 'mq-gui' },
+			{ key: 'clientId', label: 'Client ID', placeholder: 'quay' },
 			{ key: 'saslUsername', label: 'SASL 用户名', placeholder: '可选' },
 			{ key: 'saslPassword', label: 'SASL 密码', secret: true, placeholder: '可选' }
 		]
@@ -97,7 +97,7 @@ export function emptyConfig(kind: BrokerKind): ConnectionProfile['config'] {
 		return {
 			type: 'kafka',
 			brokers: '127.0.0.1:9092',
-			clientId: 'mq-gui',
+			clientId: 'quay',
 			saslUsername: '',
 			saslPassword: ''
 		};

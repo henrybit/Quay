@@ -1940,7 +1940,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "mq-gui"
+name = "quay"
 version = "0.1.0"
 dependencies = [
  "bytes",

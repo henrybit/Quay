@@ -1,4 +1,4 @@
-# Build & publish MQ GUI for Windows / macOS / Linux when a version tag is pushed.
+# Build & publish Quay for Windows / macOS / Linux when a version tag is pushed.
 #
 # Trigger:
 #   git tag v0.1.0 && git push origin v0.1.0
@@ -180,9 +180,9 @@ jobs:
           APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
         with:
           tagName: ${{ steps.meta.outputs.tag }}
-          releaseName: MQ GUI ${{ steps.meta.outputs.tag }}
+          releaseName: Quay ${{ steps.meta.outputs.tag }}
           releaseBody: |
-            ## MQ GUI ${{ steps.meta.outputs.tag }}
+            ## Quay ${{ steps.meta.outputs.tag }}
 
             Download the installer for your platform from the assets below.
 

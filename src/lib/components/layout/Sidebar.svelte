@@ -23,7 +23,7 @@
 <aside class="sidebar">
 	<div class="sidebar-brand">
 		<Logo />
-		<p>消息集群工作台</p>
+		<p>消息队列码头</p>
 	</div>
 
 	<div class="sidebar-toolbar">
