@@ -28,8 +28,9 @@
 #   If you see "MAC verification failed during PKCS12 import (wrong password?)":
 #   1. Re-export .p12 from Keychain → My Certificates → expand cert → Export the KEY
 #   2. Locally verify: openssl pkcs12 -info -in cert.p12 -passin pass:'YOUR_PASSWORD' -noout
-#   3. Re-encode with openssl base64 -A (must be ONE line) and update both secrets
-#   4. Leave signing secrets empty to ship unsigned / ad-hoc builds
+#   3. openssl base64 -A -in cert.p12 | pbcopy  → update APPLE_CERTIFICATE (one line)
+#   4. APPLE_CERTIFICATE_PASSWORD = .p12 export password only (not Apple ID / keychain password)
+#   Workflow falls back to ad-hoc signing when import fails so the Release still publishes.
 #
 # Also ensure: Settings → Actions → General → Workflow permissions → Read and write.
 
@@ -155,15 +156,29 @@ jobs:
         run: pnpm install --frozen-lockfile
 
       - name: Prepare Apple signing (macOS)
+        id: apple_sign
         if: runner.os == 'macOS'
         shell: bash
         env:
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD || 'quay-ci-keychain' }}
           APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
           APPLE_API_KEY_CONTENT: ${{ secrets.APPLE_API_KEY_CONTENT }}
         run: |
           set -euo pipefail
+
+          use_adhoc() {
+            local reason="$1"
+            echo "::warning::$reason — falling back to ad-hoc signing (not notarized)."
+            echo "APPLE_SIGNING_IDENTITY=-" >> "$GITHUB_ENV"
+            # Explicitly clear so tauri-action never receives broken PKCS12 secrets
+            {
+              echo "APPLE_CERTIFICATE="
+              echo "APPLE_CERTIFICATE_PASSWORD="
+            } >> "$GITHUB_ENV"
+            echo "mode=adhoc" >> "$GITHUB_OUTPUT"
+          }
 
           # Optional App Store Connect API key for notarization
           if [ -n "${APPLE_API_KEY_CONTENT:-}" ] && [ -n "${APPLE_API_KEY:-}" ]; then
@@ -173,81 +188,108 @@ jobs:
             echo "APPLE_API_KEY_PATH=${KEY_PATH}" >> "$GITHUB_ENV"
             echo "API_PRIVATE_KEYS_DIR=${RUNNER_TEMP}/private_keys" >> "$GITHUB_ENV"
           else
-            echo "APPLE_API_KEY_CONTENT not set; using Apple ID notarization if configured."
+            echo "APPLE_API_KEY_CONTENT not set; notarization will use Apple ID secrets if present."
           fi
 
-          # Signing certificate — verify PKCS12 before tauri build
           CERT="$(printf '%s' "${APPLE_CERTIFICATE:-}" | tr -d '\n\r[:space:]')"
           PASS="$(printf '%s' "${APPLE_CERTIFICATE_PASSWORD:-}" | tr -d '\r')"
-          # trim leading/trailing spaces from password only (password itself may be empty)
           PASS="$(printf '%s' "$PASS" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
 
           if [ -z "$CERT" ]; then
-            echo "APPLE_CERTIFICATE not set — building with ad-hoc signing."
-            echo "APPLE_SIGNING_IDENTITY=-" >> "$GITHUB_ENV"
+            use_adhoc "APPLE_CERTIFICATE not set"
             exit 0
           fi
 
           if [ -z "$PASS" ]; then
-            echo "::error::APPLE_CERTIFICATE is set but APPLE_CERTIFICATE_PASSWORD is empty."
-            echo "Re-export the .p12 with a password and update both GitHub secrets."
-            exit 1
+            use_adhoc "APPLE_CERTIFICATE_PASSWORD is empty"
+            exit 0
           fi
 
           CERT_PATH="${RUNNER_TEMP}/quay-signing.p12"
+          MODERN_PATH="${RUNNER_TEMP}/quay-signing-modern.p12"
+          PEM_PATH="${RUNNER_TEMP}/quay-signing.pem"
           printf '%s' "$CERT" | base64 --decode > "$CERT_PATH"
           FILE_SIZE="$(wc -c < "$CERT_PATH" | tr -d ' ')"
           if [ "$FILE_SIZE" -lt 100 ]; then
-            echo "::error::Decoded APPLE_CERTIFICATE is only ${FILE_SIZE} bytes — base64 is likely truncated or invalid."
-            exit 1
+            use_adhoc "Decoded APPLE_CERTIFICATE is only ${FILE_SIZE} bytes (invalid base64)"
+            exit 0
           fi
 
-          PKCS12_OK=0
+          # Prefer a PKCS12 that Apple security accepts: decrypt then re-export.
+          EXTRACTED=0
           for ARGS in "" "-legacy"; do
             # shellcheck disable=SC2086
-            if openssl pkcs12 -in "$CERT_PATH" -passin "pass:${PASS}" -noout -info $ARGS \
-              >/dev/null 2>"${RUNNER_TEMP}/pkcs12.err"; then
-              PKCS12_OK=1
+            if openssl pkcs12 -in "$CERT_PATH" -passin "pass:${PASS}" -nodes -out "$PEM_PATH" $ARGS \
+              2>"${RUNNER_TEMP}/pkcs12.err"; then
+              EXTRACTED=1
               break
             fi
           done
 
-          if [ "$PKCS12_OK" -ne 1 ]; then
-            echo "::error::PKCS12 check failed — usually wrong APPLE_CERTIFICATE_PASSWORD or bad base64."
-            echo "Local fix:"
-            echo "  1. Keychain Access → My Certificates → expand 'Developer ID Application' → Export the private KEY as .p12"
-            echo "  2. openssl pkcs12 -info -in cert.p12 -passin pass:'YOUR_PASSWORD' -noout"
-            echo "  3. openssl base64 -A -in cert.p12 | pbcopy   # update APPLE_CERTIFICATE (one line)"
-            echo "  4. APPLE_CERTIFICATE_PASSWORD = the .p12 export password only (not Apple ID password)"
-            echo "OpenSSL said:"
+          if [ "$EXTRACTED" -ne 1 ]; then
+            echo "OpenSSL could not decrypt PKCS12:"
             cat "${RUNNER_TEMP}/pkcs12.err" || true
-            exit 1
+            use_adhoc "APPLE_CERTIFICATE_PASSWORD does not match APPLE_CERTIFICATE (or cert is corrupt)"
+            exit 0
           fi
 
-          # Multiline-safe GITHUB_ENV (password may contain = # etc.)
+          openssl pkcs12 -export -in "$PEM_PATH" -out "$MODERN_PATH" -passout "pass:${PASS}" \
+            2>"${RUNNER_TEMP}/pkcs12-export.err" || {
+            cat "${RUNNER_TEMP}/pkcs12-export.err" || true
+            use_adhoc "Failed to re-export PKCS12 for Apple security"
+            exit 0
+          }
+
+          KEYCHAIN_PATH="${RUNNER_TEMP}/quay.build.keychain-db"
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security list-keychains -d user -s "$KEYCHAIN_PATH" $(security list-keychains -d user | sed s/\"//g)
+
+          if ! security import "$MODERN_PATH" -P "$PASS" -A -t cert -f pkcs12 \
+            -k "$KEYCHAIN_PATH" >/dev/null 2>"${RUNNER_TEMP}/security-import.err"; then
+            echo "security import failed:"
+            cat "${RUNNER_TEMP}/security-import.err" || true
+            use_adhoc "security import rejected PKCS12 (wrong password or unsupported cert)"
+            exit 0
+          fi
+
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security find-identity -v -p codesigning "$KEYCHAIN_PATH"
+
+          IDENTITY="$(security find-identity -v -p codesigning "$KEYCHAIN_PATH" | awk -F'"' '/Developer ID Application|Apple Distribution|Apple Development/{print $2; exit}')"
+          if [ -z "$IDENTITY" ]; then
+            use_adhoc "No usable codesigning identity found after import"
+            exit 0
+          fi
+
+          # Import into keychain ourselves; do NOT pass APPLE_CERTIFICATE to Tauri
+          # (avoids a second security import that fails with MAC verification).
           {
-            echo "APPLE_CERTIFICATE<<CERT_EOF"
-            echo "$CERT"
-            echo "CERT_EOF"
-            echo "APPLE_CERTIFICATE_PASSWORD<<PASS_EOF"
-            echo "$PASS"
-            echo "PASS_EOF"
+            echo "APPLE_SIGNING_IDENTITY<<ID_EOF"
+            echo "$IDENTITY"
+            echo "ID_EOF"
+            echo "APPLE_CERTIFICATE="
+            echo "APPLE_CERTIFICATE_PASSWORD="
           } >> "$GITHUB_ENV"
-          echo "Apple signing certificate verified (${FILE_SIZE} bytes)."
+          echo "mode=signed" >> "$GITHUB_OUTPUT"
+          echo "Imported signing identity: $IDENTITY"
 
       - name: Build and upload release assets
         uses: tauri-apps/tauri-action@v1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # Prefer cleaned values from the prepare step; fall back to secrets on non-macOS
-          APPLE_CERTIFICATE: ${{ env.APPLE_CERTIFICATE || secrets.APPLE_CERTIFICATE }}
-          APPLE_CERTIFICATE_PASSWORD: ${{ env.APPLE_CERTIFICATE_PASSWORD || secrets.APPLE_CERTIFICATE_PASSWORD }}
-          APPLE_SIGNING_IDENTITY: ${{ env.APPLE_SIGNING_IDENTITY || secrets.APPLE_SIGNING_IDENTITY }}
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
-          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          # Never pass raw PKCS12 secrets into tauri-action on macOS.
+          # Prepare step imports into keychain (signed) or clears them (adhoc).
+          APPLE_CERTIFICATE: ${{ env.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ env.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ env.APPLE_SIGNING_IDENTITY }}
+          # Notarization only when Developer ID import succeeded
+          APPLE_ID: ${{ steps.apple_sign.outputs.mode == 'signed' && secrets.APPLE_ID || '' }}
+          APPLE_PASSWORD: ${{ steps.apple_sign.outputs.mode == 'signed' && secrets.APPLE_PASSWORD || '' }}
+          APPLE_TEAM_ID: ${{ steps.apple_sign.outputs.mode == 'signed' && secrets.APPLE_TEAM_ID || '' }}
+          APPLE_API_KEY: ${{ steps.apple_sign.outputs.mode == 'signed' && secrets.APPLE_API_KEY || '' }}
+          APPLE_API_ISSUER: ${{ steps.apple_sign.outputs.mode == 'signed' && secrets.APPLE_API_ISSUER || '' }}
         with:
           tagName: ${{ steps.meta.outputs.tag }}
           releaseName: Quay ${{ steps.meta.outputs.tag }}
