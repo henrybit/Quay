@@ -2,8 +2,8 @@
 # macOS signing follows the same pattern as db-gui (HiDataLinker):
 #   pass APPLE_* secrets straight to tauri-action — do not pre-import PKCS12.
 #
-# Trigger:
-#   git tag v0.1.0 && git push origin v0.1.0
+# Trigger: any git tag push (no naming prefix required), or workflow_dispatch.
+#   git tag 0.1.0 && git push origin 0.1.0
 #
 # Required secrets (same names as db-gui — copy from that repo if builds already succeed there):
 #   APPLE_CERTIFICATE            Single-line base64 of Developer ID Application .p12
@@ -20,7 +20,7 @@ name: Release
 on:
   push:
     tags:
-      - 'v*.*.*'
+      - '*'
   workflow_dispatch:
     inputs:
       platform:
@@ -80,10 +80,17 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Sync version from git tag
-        if: startsWith(github.ref, 'refs/tags/v')
+        if: startsWith(github.ref, 'refs/tags/')
         shell: bash
         run: |
-          export VERSION="${GITHUB_REF_NAME#v}"
+          # Optional leading "v"; only sync when remainder looks like semver (Cargo requires it)
+          RAW="${GITHUB_REF_NAME}"
+          VERSION="${RAW#v}"
+          if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+([+.-].*)?$ ]]; then
+            echo "Tag '${RAW}' is not semver-like; keep package versions unchanged."
+            exit 0
+          fi
+          export VERSION
           python3 <<'PY'
           import json, os, pathlib, re
           version = os.environ["VERSION"]
@@ -238,8 +245,9 @@ jobs:
           APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         with:
-          tagName: v__VERSION__
-          releaseName: Quay v__VERSION__
+          # Tag push → use the pushed tag name as-is; manual run → v + app version
+          tagName: ${{ github.ref_type == 'tag' && github.ref_name || 'v__VERSION__' }}
+          releaseName: ${{ github.ref_type == 'tag' && format('Quay {0}', github.ref_name) || 'Quay v__VERSION__' }}
           releaseBody: |
             安装包正在上传。全部平台完成后会补上下载地址。
           releaseDraft: false
@@ -263,8 +271,7 @@ jobs:
         run: |
           set -eu
           version=$(node -p "require('./package.json').version")
-          # Prefer the pushed tag when present
-          if [[ "${GITHUB_REF:-}" == refs/tags/v* ]]; then
+          if [[ "${GITHUB_REF:-}" == refs/tags/* ]]; then
             tag="${GITHUB_REF_NAME}"
             version="${tag#v}"
           else
@@ -273,7 +280,7 @@ jobs:
           notes=$(mktemp)
 
           {
-            echo "# Quay ${version}"
+            echo "# Quay ${tag}"
             echo
             echo "桌面端消息中间件查看工具（RabbitMQ / Kafka / RocketMQ）。"
             echo
@@ -302,5 +309,5 @@ jobs:
             echo "macOS 安装包使用 Developer ID 签名并公证。Windows 若被 SmartScreen 拦截，选择仍要运行。"
           } > "$notes"
 
-          gh release edit "$tag" --repo "$REPO" --title "Quay v${version}" --notes-file "$notes"
+          gh release edit "$tag" --repo "$REPO" --title "Quay ${tag}" --notes-file "$notes"
           echo "Updated https://github.com/${REPO}/releases/tag/${tag}"
