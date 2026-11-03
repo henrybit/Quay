@@ -133,9 +133,10 @@ jobs:
       - name: Install frontend dependencies
         run: pnpm install --frozen-lockfile
 
-      # Same secret names as db-gui. Normalize PKCS12 before tauri-action:
-      # Apple's `security import` often rejects older .p12 MAC algos even with the
-      # correct password ("MAC verification failed"). Re-export fixes that.
+      # Password is read correctly (openssl decrypt succeeds). Apple's `security`
+      # still rejects many OpenSSL-default PKCS12 exports with "MAC verification
+      # failed". Re-export with Apple-compatible PBE, import into a CI keychain,
+      # and pass only APPLE_SIGNING_IDENTITY to tauri-action (no second PKCS12 import).
       - name: Prepare Apple signing secrets
         if: matrix.platform == 'macos-latest'
         env:
@@ -144,6 +145,7 @@ jobs:
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD || 'quay-ci-keychain' }}
         run: |
           set -euo pipefail
           missing=0
@@ -159,10 +161,12 @@ jobs:
 
           CERT="$(printf '%s' "$APPLE_CERTIFICATE" | tr -d '\n\r[:space:]')"
           PASS="$(printf '%s' "$APPLE_CERTIFICATE_PASSWORD" | tr -d '\r' | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+          echo "APPLE_CERTIFICATE_PASSWORD length: ${#PASS} (value not printed)"
+          echo "APPLE_CERTIFICATE base64 length: ${#CERT}"
+
           RAW_PATH="${RUNNER_TEMP}/apple-raw.p12"
           PEM_PATH="${RUNNER_TEMP}/apple.pem"
-          OUT_PATH="${RUNNER_TEMP}/apple-modern.p12"
-
+          OUT_PATH="${RUNNER_TEMP}/apple-applecompat.p12"
           printf '%s' "$CERT" | base64 --decode > "$RAW_PATH"
           SIZE="$(wc -c < "$RAW_PATH" | tr -d ' ')"
           echo "Decoded APPLE_CERTIFICATE size: ${SIZE} bytes"
@@ -173,41 +177,63 @@ jobs:
             if openssl pkcs12 -in "$RAW_PATH" -passin "pass:${PASS}" -nodes -out "$PEM_PATH" $ARGS \
               2>"${RUNNER_TEMP}/pkcs12-err.txt"; then
               EXTRACTED=1
-              echo "PKCS12 decrypted with openssl${ARGS:+ $ARGS}"
+              echo "PKCS12 decrypted with openssl${ARGS:+ $ARGS} — password matches certificate"
               break
             fi
           done
 
           if [ "$EXTRACTED" -ne 1 ]; then
             echo "::error::Cannot decrypt APPLE_CERTIFICATE with APPLE_CERTIFICATE_PASSWORD."
-            echo "These two secrets must come from the SAME .p12 export (password = export password)."
-            echo "If db-gui signs successfully, re-upload BOTH values from that same .p12 file:"
-            echo "  openssl base64 -A -in cert.p12 | pbcopy   # APPLE_CERTIFICATE"
-            echo "  # APPLE_CERTIFICATE_PASSWORD = the export password used above"
             echo "OpenSSL error:"
             cat "${RUNNER_TEMP}/pkcs12-err.txt" || true
             exit 1
           fi
 
-          openssl pkcs12 -export -in "$PEM_PATH" -out "$OUT_PATH" -passout "pass:${PASS}"
-          MODERN_B64="$(openssl base64 -A -in "$OUT_PATH")"
+          # PBE-SHA1-3DES + SHA1 MAC is what `security import` reliably accepts.
+          openssl pkcs12 -export -in "$PEM_PATH" -out "$OUT_PATH" -passout "pass:${PASS}" \
+            -certpbe PBE-SHA1-3DES -keypbe PBE-SHA1-3DES -macalg SHA1
+
+          KEYCHAIN_PATH="${RUNNER_TEMP}/quay.build.keychain-db"
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security list-keychains -d user -s "$KEYCHAIN_PATH" $(security list-keychains -d user | sed 's/"//g')
+
+          if ! security import "$OUT_PATH" -P "$PASS" -A -t cert -f pkcs12 \
+            -k "$KEYCHAIN_PATH" 2>"${RUNNER_TEMP}/security-import.err"; then
+            echo "::error::security import failed after Apple-compatible re-export."
+            cat "${RUNNER_TEMP}/security-import.err" || true
+            exit 1
+          fi
+
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security find-identity -v -p codesigning "$KEYCHAIN_PATH"
+
+          IDENTITY="$(security find-identity -v -p codesigning "$KEYCHAIN_PATH" \
+            | awk -F'"' '/Developer ID Application|Apple Distribution|Apple Development/{print $2; exit}')"
+          if [ -z "$IDENTITY" ]; then
+            echo "::error::No codesigning identity found after import."
+            security find-identity -v -p codesigning "$KEYCHAIN_PATH" || true
+            exit 1
+          fi
 
           {
-            echo "APPLE_CERTIFICATE<<CERT_EOF"
-            echo "$MODERN_B64"
-            echo "CERT_EOF"
-            echo "APPLE_CERTIFICATE_PASSWORD<<PASS_EOF"
-            echo "$PASS"
-            echo "PASS_EOF"
+            echo "APPLE_SIGNING_IDENTITY<<ID_EOF"
+            echo "$IDENTITY"
+            echo "ID_EOF"
+            # Prevent tauri-action from calling security import again on PKCS12
+            echo "APPLE_CERTIFICATE="
+            echo "APPLE_CERTIFICATE_PASSWORD="
           } >> "$GITHUB_ENV"
-          echo "Prepared modern PKCS12 for tauri-action (${#MODERN_B64} base64 chars)."
+          echo "Imported identity for codesign: $IDENTITY"
 
       - uses: tauri-apps/tauri-action@v1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # macOS: use normalized values from the prepare step (empty on other OSes — ignored)
+          # Identity from keychain import; PKCS12 env intentionally empty on macOS
           APPLE_CERTIFICATE: ${{ env.APPLE_CERTIFICATE }}
           APPLE_CERTIFICATE_PASSWORD: ${{ env.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ env.APPLE_SIGNING_IDENTITY }}
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
