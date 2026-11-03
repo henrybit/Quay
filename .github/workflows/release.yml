@@ -133,8 +133,10 @@ jobs:
       - name: Install frontend dependencies
         run: pnpm install --frozen-lockfile
 
-      # Same as db-gui: only verify secrets exist; let tauri-action import the PKCS12.
-      - name: Check Apple signing secrets
+      # Same secret names as db-gui. Normalize PKCS12 before tauri-action:
+      # Apple's `security import` often rejects older .p12 MAC algos even with the
+      # correct password ("MAC verification failed"). Re-export fixes that.
+      - name: Prepare Apple signing secrets
         if: matrix.platform == 'macos-latest'
         env:
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
@@ -143,6 +145,7 @@ jobs:
           APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         run: |
+          set -euo pipefail
           missing=0
           for name in APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD APPLE_ID APPLE_PASSWORD APPLE_TEAM_ID; do
             if [ -z "${!name}" ]; then
@@ -150,13 +153,61 @@ jobs:
               missing=1
             fi
           done
-          exit "$missing"
+          if [ "$missing" -ne 0 ]; then
+            exit 1
+          fi
+
+          CERT="$(printf '%s' "$APPLE_CERTIFICATE" | tr -d '\n\r[:space:]')"
+          PASS="$(printf '%s' "$APPLE_CERTIFICATE_PASSWORD" | tr -d '\r' | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+          RAW_PATH="${RUNNER_TEMP}/apple-raw.p12"
+          PEM_PATH="${RUNNER_TEMP}/apple.pem"
+          OUT_PATH="${RUNNER_TEMP}/apple-modern.p12"
+
+          printf '%s' "$CERT" | base64 --decode > "$RAW_PATH"
+          SIZE="$(wc -c < "$RAW_PATH" | tr -d ' ')"
+          echo "Decoded APPLE_CERTIFICATE size: ${SIZE} bytes"
+
+          EXTRACTED=0
+          for ARGS in "" "-legacy"; do
+            # shellcheck disable=SC2086
+            if openssl pkcs12 -in "$RAW_PATH" -passin "pass:${PASS}" -nodes -out "$PEM_PATH" $ARGS \
+              2>"${RUNNER_TEMP}/pkcs12-err.txt"; then
+              EXTRACTED=1
+              echo "PKCS12 decrypted with openssl${ARGS:+ $ARGS}"
+              break
+            fi
+          done
+
+          if [ "$EXTRACTED" -ne 1 ]; then
+            echo "::error::Cannot decrypt APPLE_CERTIFICATE with APPLE_CERTIFICATE_PASSWORD."
+            echo "These two secrets must come from the SAME .p12 export (password = export password)."
+            echo "If db-gui signs successfully, re-upload BOTH values from that same .p12 file:"
+            echo "  openssl base64 -A -in cert.p12 | pbcopy   # APPLE_CERTIFICATE"
+            echo "  # APPLE_CERTIFICATE_PASSWORD = the export password used above"
+            echo "OpenSSL error:"
+            cat "${RUNNER_TEMP}/pkcs12-err.txt" || true
+            exit 1
+          fi
+
+          openssl pkcs12 -export -in "$PEM_PATH" -out "$OUT_PATH" -passout "pass:${PASS}"
+          MODERN_B64="$(openssl base64 -A -in "$OUT_PATH")"
+
+          {
+            echo "APPLE_CERTIFICATE<<CERT_EOF"
+            echo "$MODERN_B64"
+            echo "CERT_EOF"
+            echo "APPLE_CERTIFICATE_PASSWORD<<PASS_EOF"
+            echo "$PASS"
+            echo "PASS_EOF"
+          } >> "$GITHUB_ENV"
+          echo "Prepared modern PKCS12 for tauri-action (${#MODERN_B64} base64 chars)."
 
       - uses: tauri-apps/tauri-action@v1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
-          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          # macOS: use normalized values from the prepare step (empty on other OSes — ignored)
+          APPLE_CERTIFICATE: ${{ env.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ env.APPLE_CERTIFICATE_PASSWORD }}
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
