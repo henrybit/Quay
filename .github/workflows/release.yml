@@ -152,9 +152,6 @@ jobs:
             echo "APPLE_SIGNING_IDENTITY<<EOF"
             echo "$IDENTITY"
             echo "EOF"
-            # 清空，禁止 tauri-action 再对 PKCS12 调 security import
-            echo "APPLE_CERTIFICATE="
-            echo "APPLE_CERTIFICATE_PASSWORD="
           } >> "$GITHUB_ENV"
           echo "Using signing identity: $IDENTITY"
 
@@ -162,8 +159,10 @@ jobs:
         uses: tauri-apps/tauri-action@v1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          APPLE_CERTIFICATE: ${{ env.APPLE_CERTIFICATE }}
-          APPLE_CERTIFICATE_PASSWORD: ${{ env.APPLE_CERTIFICATE_PASSWORD }}
+          # 不要传 APPLE_CERTIFICATE / PASSWORD（即使是空字符串）：
+          # Tauri 只要看到这两个变量就会再调 security import，空值会报
+          # "One or more parameters passed to a function were not valid."
+          # 证书已在上一步导入钥匙串，这里只传 identity + 公证账号。
           APPLE_SIGNING_IDENTITY: ${{ env.APPLE_SIGNING_IDENTITY }}
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
